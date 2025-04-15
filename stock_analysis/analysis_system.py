@@ -2,7 +2,8 @@
 import os
 import asyncio
 from langchain.llms.base import LLM
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import schedule
 import time
@@ -10,7 +11,7 @@ import pandas as pd
 from dotenv import load_dotenv
 import requests
 from typing import Optional, List, Dict, Any
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # 从环境变量获取OpenAI密钥
@@ -43,8 +44,16 @@ asyncio.get_event_loop().run_until_complete(start_mcp_client())
 # 从MCP客户端获取工具列表
 tools = client.get_tools()  # 包含stock_server提供的所有工具
 
+from langchain.agents import initialize_agent, AgentType
+
 # 创建基于ReAct模式的智能代理
-agent = create_react_agent(llm, tools)
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+    handle_parsing_errors=True
+)
 
 # 定义每日分析报告生成函数
 def run_daily_analysis():
