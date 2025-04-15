@@ -1,62 +1,121 @@
 # stock_server.py
 from mcp.server.fastmcp import FastMCP
+import akshare as ak
+import pandas as pd
+import time
+import os
+from functools import lru_cache
+import requests
+from datetime import datetime
 
 # 创建MCP服务器实例，命名为 "AStockData"
 mcp = FastMCP("AStockData")
+
+@lru_cache(maxsize=128)
+def get_cached_data(func, *args, **kwargs):
+    """数据缓存装饰器，缓存时间为5分钟"""
+    return func(*args, **kwargs)
 
 # 1. 获取当日资金流入最多的前N只股票
 @mcp.tool()
 def get_top_inflows(top_n: int = 5) -> list:
     """获取今日主力资金净流入最多的前N只股票及金额。返回列表，每项为(股票名称, 净流入额)。"""
-    # **实际应用**: 调用数据源获取今日资金流入排名，例如通过Tushare的资金流向接口
-    # 这里使用模拟数据
-    sample_data = [
-        ("贵州茅台", 5.3),
-        ("平安银行", 4.1),
-        ("招商证券", 3.8),
-        ("宁德时代", 3.5),
-        ("万科A", 2.9)
-    ]
-    return sample_data[:top_n]
+    try:
+        df = get_cached_data(ak.stock_fund_flow_individual)
+        
+        if df is None or df.empty:
+            return [("获取数据失败", 0)]
+        
+        df = df.sort_values(by="主力净流入-净额", ascending=False).head(top_n)
+        
+        result = [(row["名称"], round(row["主力净流入-净额"]/100000000, 2)) for _, row in df.iterrows()]
+        return result
+    except Exception as e:
+        print(f"获取资金流入数据时出错: {e}")
+        return [("数据获取错误", 0)]
 
 # 2. 获取指定股票的资金流动数据
 @mcp.tool()
 def get_capital_flow(stock_code: str) -> dict:
     """获取指定股票今日的资金流向数据，返回字典包括净流入额、买入额、卖出额等。"""
-    # **实际应用**: 查询实时资金流，如主力/散户资金净流入。这里用模拟值。
-    data = {
-        "stock": stock_code,
-        "net_inflow": 1.2,      # 主力净流入（亿元）
-        "buy_amount": 5.6,     # 主力买入额
-        "sell_amount": 4.4     # 主力卖出额
-    }
-    return data
+    try:
+        df = get_cached_data(ak.stock_individual_fund_flow, symbol=stock_code)
+        
+        if df is None or df.empty:
+            return {"stock": stock_code, "error": "未找到数据"}
+        
+        latest_data = df.iloc[0]
+        
+        result = {
+            "stock": stock_code,
+            "net_inflow": round(latest_data["主力净流入"] / 100000000, 2),  # 转为亿元并保留两位小数
+            "buy_amount": round(latest_data["主力买入"] / 100000000, 2),
+            "sell_amount": round(latest_data["主力卖出"] / 100000000, 2)
+        }
+        return result
+    except Exception as e:
+        print(f"获取股票{stock_code}资金流数据时出错: {e}")
+        return {"stock": stock_code, "error": str(e)}
 
 # 3. 获取指定股票的基本面摘要
 @mcp.tool()
 def get_fundamentals(stock_code: str) -> dict:
     """获取股票最新基本面数据摘要，如市值、PE、ROE等。"""
-    # **实际应用**: 查询财报或行情数据，这里简化为示例数据
-    data = {
-        "stock": stock_code,
-        "price": 25.30,        # 最新股价
-        "pe_ratio": 12.5,      # 市盈率
-        "roe": 15.2,           # 净资产收益率（%）
-        "revenue_growth": 8.3  # 营收增长率（%）
-    }
-    return data
+    try:
+        df_info = get_cached_data(ak.stock_individual_info, symbol=stock_code)
+        
+        if df_info is None or df_info.empty:
+            return {"stock": stock_code, "error": "未找到数据"}
+        
+        price_data = get_cached_data(ak.stock_zh_a_spot)
+        price_data = price_data[price_data['代码'] == stock_code]
+        current_price = price_data['最新价'].values[0] if not price_data.empty else 0
+        
+        result = {
+            "stock": stock_code,
+            "price": current_price,
+            "pe_ratio": float(df_info[df_info['item'] == '市盈率(动态)']['value'].values[0]) if '市盈率(动态)' in df_info['item'].values else 0,
+            "roe": float(df_info[df_info['item'] == 'ROE(%)']['value'].values[0]) if 'ROE(%)' in df_info['item'].values else 0,
+            "revenue_growth": float(df_info[df_info['item'] == '营业收入同比增长(%)']['value'].values[0]) if '营业收入同比增长(%)' in df_info['item'].values else 0
+        }
+        return result
+    except Exception as e:
+        print(f"获取股票{stock_code}基本面数据时出错: {e}")
+        return {"stock": stock_code, "error": str(e)}
 
 # 4. 获取指定股票的新闻摘要
 @mcp.tool()
 def get_news(stock_code: str) -> list:
     """获取指定股票相关的最新新闻标题列表。"""
-    # **实际应用**: 调用新闻API或爬虫，这里返回模拟新闻
-    sample_news = [
-        f"{stock_code}: 公司发布季度业绩，利润同比增长20%",
-        f"{stock_code}: 宣布与知名企业达成战略合作",
-        f"{stock_code}: 所在行业迎来政策利好，市场前景看好"
-    ]
-    return sample_news
+    try:
+        df_news = get_cached_data(ak.stock_news_em)
+        
+        if df_news is None or df_news.empty:
+            return [f"{stock_code}: 未找到相关新闻"]
+        
+        stock_name = ""
+        try:
+            stock_info = get_cached_data(ak.stock_individual_info_em, symbol=stock_code)
+            if not stock_info.empty:
+                stock_name = stock_info.iloc[0]['股票简称']
+        except:
+            pass
+        
+        filtered_news = []
+        if stock_name:
+            for _, row in df_news.iterrows():
+                if stock_name in str(row['标题']) or stock_code in str(row['标题']):
+                    filtered_news.append(f"{stock_code}: {row['标题']}")
+                if len(filtered_news) >= 3:  # 最多返回3条新闻
+                    break
+        
+        if not filtered_news:
+            filtered_news = [f"{stock_code}: {row['标题']}" for _, row in df_news.head(3).iterrows()]
+            
+        return filtered_news
+    except Exception as e:
+        print(f"获取股票{stock_code}新闻时出错: {e}")
+        return [f"{stock_code}: 获取新闻数据出错: {str(e)}"]
 
 # 运行MCP服务（如果直接执行此脚本）
 if __name__ == "__main__":
